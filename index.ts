@@ -113,6 +113,16 @@ async function run() {
       }
     };
 
+    interface Listing {
+      title: string;
+      description: string;
+      image: string;
+      location: string;
+      price: number;
+      duration: string;
+      maxGuests: number;
+    }
+
     // ==============================
     // Root API
     // ==============================
@@ -120,6 +130,146 @@ async function run() {
     app.get('/', (_req: Request, res: Response) => {
       res.send('TrailNest Backend Running 🚀');
     });
+
+    //! Listing APIs
+    // ==============================
+    app.post(
+      '/listing',
+      verifyToken,
+      async (req: AuthRequest, res: Response) => {
+        const listing: Listing = req.body;
+
+        const newListing = {
+          ...listing,
+          ownerId: req.user?._id,
+          ownerEmail: req.user?.email,
+          bookingCount: 0,
+          createdAt: new Date(),
+        };
+
+        const result = await listingCollection.insertOne(newListing);
+
+        res.send(result);
+      },
+    );
+
+    app.get('/listing', async (_req: Request, res: Response) => {
+      const result = await listingCollection
+        .find()
+        .sort({ createdAt: -1 })
+        .toArray();
+
+      res.send(result);
+    });
+
+    app.get('/featured', async (_req: Request, res: Response) => {
+      const result = await listingCollection
+        .find()
+        .sort({ createdAt: -1 })
+        .limit(6)
+        .toArray();
+
+      res.send(result);
+    });
+
+    app.get('/listing/:id', async (req: Request, res: Response) => {
+      const { id } = req.params;
+
+      const result = await listingCollection.findOne({
+        _id: new ObjectId(id),
+      });
+
+      res.send(result);
+    });
+
+    app.put(
+      '/listing/:id',
+      verifyToken,
+      async (req: AuthRequest, res: Response) => {
+        const { id } = req.params;
+
+        const listing = await listingCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!listing) {
+          return res.status(404).send({
+            message: 'Listing not found',
+          });
+        }
+
+        if (listing.ownerEmail !== req.user?.email) {
+          return res.status(403).send({
+            message: 'Forbidden',
+          });
+        }
+
+        await listingCollection.updateOne(
+          {
+            _id: new ObjectId(id),
+          },
+          {
+            $set: {
+              ...req.body,
+              updatedAt: new Date(),
+            },
+          },
+        );
+
+        res.send({
+          message: 'Updated Successfully',
+        });
+      },
+    );
+
+    app.delete(
+      '/listing/:id',
+      verifyToken,
+      async (req: AuthRequest, res: Response) => {
+        const { id } = req.params;
+
+        const listing = await listingCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!listing) {
+          return res.status(404).send({
+            message: 'Listing not found',
+          });
+        }
+
+        if (listing.ownerEmail !== req.user?.email) {
+          return res.status(403).send({
+            message: 'Forbidden',
+          });
+        }
+
+        await listingCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+
+        res.send({
+          message: 'Deleted Successfully',
+        });
+      },
+    );
+
+    app.get(
+      '/my-listings',
+      verifyToken,
+      async (req: AuthRequest, res: Response) => {
+        const result = await listingCollection
+          .find({
+            ownerEmail: req.user?.email,
+          })
+          .sort({
+            createdAt: -1,
+          })
+          .toArray();
+
+        res.send(result);
+      },
+    );
 
     // ==============================
     // Protected API
