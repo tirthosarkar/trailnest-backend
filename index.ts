@@ -474,8 +474,48 @@ async function run() {
     // BOOKING APIs
     // ==============================
 
+    // Get user's bookings (already exists from previous step)
+    app.get(
+      '/my-bookings',
+      verifyToken,
+      async (req: AuthRequest, res: Response) => {
+        try {
+          const bookings = await bookingCollection
+            .find({
+              userEmail: req.user?.email,
+            })
+            .sort({
+              createdAt: -1,
+            })
+            .toArray();
+
+          // Get listing details for each booking
+          const bookingsWithDetails = await Promise.all(
+            bookings.map(async booking => {
+              const listing = await listingCollection.findOne({
+                _id: booking.listingId,
+              });
+              return {
+                ...booking,
+                listing: listing || null,
+              };
+            }),
+          );
+
+          res.send(bookingsWithDetails);
+        } catch (error) {
+          console.error('Error fetching bookings:', error);
+          res.status(500).send({
+            error: 'Failed to fetch bookings',
+            message: error instanceof Error ? error.message : 'Unknown error',
+          });
+        }
+      },
+    );
+
     // Create Booking (Protected)
     // Create Booking (Protected) - With conflict check
+
     app.post(
       '/bookings',
       verifyToken,
@@ -483,21 +523,32 @@ async function run() {
         try {
           const {
             listingId,
+            listingType,
             startDate,
             endDate,
             guests,
+            quantity,
             totalPrice,
             specialNote,
           } = req.body;
 
+          console.log('📦 Booking request:', {
+            listingId,
+            listingType,
+            startDate,
+            endDate,
+            guests,
+            quantity,
+            totalPrice,
+          });
+
           // Validate required fields
-          if (!listingId || !startDate || !endDate || !guests || !totalPrice) {
+          if (!listingId || !listingType || !totalPrice) {
             return res.status(400).send({
               error: 'Missing required booking fields',
             });
           }
 
-          // Ensure listingId is a valid string
           const idString = Array.isArray(listingId) ? listingId[0] : listingId;
 
           if (!ObjectId.isValid(idString)) {
@@ -517,53 +568,84 @@ async function run() {
             });
           }
 
-          // CONFLICT CHECK: Check if dates overlap with existing confirmed bookings
-          const start = new Date(startDate);
-          const end = new Date(endDate);
+          // For campsites: validate dates and check conflicts
+          if (listingType === 'campsite') {
+            if (!startDate || !endDate) {
+              return res.status(400).send({
+                error: 'Start date and end date are required for campsites',
+              });
+            }
 
-          const overlappingBookings = await bookingCollection.findOne({
-            listingId: new ObjectId(idString),
-            status: 'confirmed',
-            $or: [
-              {
-                // Booking starts during requested period
-                startDate: { $gte: start, $lt: end },
-              },
-              {
-                // Booking ends during requested period
-                endDate: { $gt: start, $lte: end },
-              },
-              {
-                // Booking completely covers requested period
-                startDate: { $lte: start },
-                endDate: { $gte: end },
-              },
-            ],
-          });
+            const start = new Date(startDate);
+            const end = new Date(endDate);
 
-          if (overlappingBookings) {
-            return res.status(409).send({
-              error: 'Date conflict',
-              message:
-                'These dates are already booked. Please select different dates.',
+            // Validate dates
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+
+            if (start < today) {
+              return res.status(400).send({
+                error: 'Start date must be today or a future date',
+              });
+            }
+
+            if (end <= start) {
+              return res.status(400).send({
+                error: 'End date must be after start date',
+              });
+            }
+
+            // Check for overlapping bookings
+            const overlappingBookings = await bookingCollection.findOne({
+              listingId: new ObjectId(idString),
+              status: 'confirmed',
+              $or: [
+                {
+                  startDate: { $gte: start, $lt: end },
+                },
+                {
+                  endDate: { $gt: start, $lte: end },
+                },
+                {
+                  startDate: { $lte: start },
+                  endDate: { $gte: end },
+                },
+              ],
             });
+
+            if (overlappingBookings) {
+              return res.status(409).send({
+                error: 'Date conflict',
+                message:
+                  'These dates are already booked. Please select different dates.',
+              });
+            }
           }
 
-          // Create booking
-          const booking = {
+          // Create booking object
+          const booking: any = {
             listingId: new ObjectId(idString),
+            listingType,
             userId: req.user?._id,
             userName: req.user?.name,
             userEmail: req.user?.email,
-            startDate: start,
-            endDate: end,
-            guests,
             totalPrice,
             specialNote: specialNote || null,
             status: 'confirmed',
             createdAt: new Date(),
             updatedAt: new Date(),
           };
+
+          // Add type-specific fields
+          if (listingType === 'campsite') {
+            booking.startDate = new Date(startDate);
+            booking.endDate = new Date(endDate);
+            booking.guests = guests || 1;
+          } else {
+            booking.quantity = quantity || 1;
+          }
+
+          console.log('📝 Creating booking:', booking);
 
           const result = await bookingCollection.insertOne(booking);
 
@@ -592,7 +674,6 @@ async function run() {
         }
       },
     );
-
     // Get My Bookings (Protected)
     // Get bookings for a listing (for conflict check)
     app.get(
