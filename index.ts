@@ -475,13 +475,20 @@ async function run() {
     // ==============================
 
     // Create Booking (Protected)
+    // Create Booking (Protected) - With conflict check
     app.post(
       '/bookings',
       verifyToken,
       async (req: AuthRequest, res: Response) => {
         try {
-          const { listingId, startDate, endDate, guests, totalPrice } =
-            req.body;
+          const {
+            listingId,
+            startDate,
+            endDate,
+            guests,
+            totalPrice,
+            specialNote,
+          } = req.body;
 
           // Validate required fields
           if (!listingId || !startDate || !endDate || !guests || !totalPrice) {
@@ -510,18 +517,52 @@ async function run() {
             });
           }
 
+          // CONFLICT CHECK: Check if dates overlap with existing confirmed bookings
+          const start = new Date(startDate);
+          const end = new Date(endDate);
+
+          const overlappingBookings = await bookingCollection.findOne({
+            listingId: new ObjectId(idString),
+            status: 'confirmed',
+            $or: [
+              {
+                // Booking starts during requested period
+                startDate: { $gte: start, $lt: end },
+              },
+              {
+                // Booking ends during requested period
+                endDate: { $gt: start, $lte: end },
+              },
+              {
+                // Booking completely covers requested period
+                startDate: { $lte: start },
+                endDate: { $gte: end },
+              },
+            ],
+          });
+
+          if (overlappingBookings) {
+            return res.status(409).send({
+              error: 'Date conflict',
+              message:
+                'These dates are already booked. Please select different dates.',
+            });
+          }
+
           // Create booking
           const booking = {
             listingId: new ObjectId(idString),
             userId: req.user?._id,
             userName: req.user?.name,
             userEmail: req.user?.email,
-            startDate: new Date(startDate),
-            endDate: new Date(endDate),
+            startDate: start,
+            endDate: end,
             guests,
             totalPrice,
+            specialNote: specialNote || null,
             status: 'confirmed',
             createdAt: new Date(),
+            updatedAt: new Date(),
           };
 
           const result = await bookingCollection.insertOne(booking);
@@ -529,7 +570,10 @@ async function run() {
           // Increment booking count
           await listingCollection.updateOne(
             { _id: new ObjectId(idString) },
-            { $inc: { bookingCount: 1 } },
+            {
+              $inc: { bookingCount: 1 },
+              $set: { updatedAt: new Date() },
+            },
           );
 
           res.status(201).send({
@@ -550,39 +594,37 @@ async function run() {
     );
 
     // Get My Bookings (Protected)
+    // Get bookings for a listing (for conflict check)
     app.get(
-      '/my-bookings',
-      verifyToken,
-      async (req: AuthRequest, res: Response) => {
+      '/bookings/listing/:listingId',
+      async (req: Request, res: Response) => {
         try {
-          const result = await bookingCollection
+          const { listingId } = req.params;
+          const idString = Array.isArray(listingId) ? listingId[0] : listingId;
+
+          if (!ObjectId.isValid(idString)) {
+            return res.status(400).send({
+              error: 'Invalid listing ID format',
+            });
+          }
+
+          const bookings = await bookingCollection
             .find({
-              userEmail: req.user?.email,
+              listingId: new ObjectId(idString),
+              status: 'confirmed',
             })
-            .sort({
-              createdAt: -1,
+            .project({
+              startDate: 1,
+              endDate: 1,
+              status: 1,
             })
             .toArray();
 
-          // Get listing details for each booking
-          const bookingsWithDetails = await Promise.all(
-            result.map(async booking => {
-              const listing = await listingCollection.findOne({
-                _id: booking.listingId,
-              });
-              return {
-                ...booking,
-                listing,
-              };
-            }),
-          );
-
-          res.send(bookingsWithDetails);
+          res.send(bookings);
         } catch (error) {
           console.error('Error fetching bookings:', error);
           res.status(500).send({
             error: 'Failed to fetch bookings',
-            message: error instanceof Error ? error.message : 'Unknown error',
           });
         }
       },
