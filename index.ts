@@ -6,16 +6,13 @@ import { MongoClient, ObjectId, ServerApiVersion } from 'mongodb';
 dotenv.config();
 
 const app = express();
-
 const port = Number(process.env.PORT) || 5000;
-
 const uri = process.env.MONGO_DB_URI;
 const DB = process.env.AUTH_DB_NAME;
 
 if (!uri) {
   throw new Error('MONGO_DB_URI is missing.');
 }
-
 if (!DB) {
   throw new Error('AUTH_DB_NAME is missing.');
 }
@@ -46,10 +43,7 @@ interface AuthRequest extends Request {
 
 async function run() {
   try {
-    // await client.connect();
-
     const db = client.db(DB);
-
     const userCollection = db.collection('user');
     const sessionCollection = db.collection('session');
     const listingCollection = db.collection('listings');
@@ -102,26 +96,14 @@ async function run() {
         }
 
         req.user = user as AuthRequest['user'];
-
         next();
       } catch (error) {
-        console.log(error);
-
+        console.error('Auth Error:', error);
         res.status(500).json({
           message: 'Authentication Failed',
         });
       }
     };
-
-    interface Listing {
-      title: string;
-      description: string;
-      image: string;
-      location: string;
-      price: number;
-      duration: string;
-      maxGuests: number;
-    }
 
     // ==============================
     // Root API
@@ -131,36 +113,71 @@ async function run() {
       res.send('TrailNest Backend Running 🚀');
     });
 
-    //! Listing APIs
     // ==============================
+    // LISTING APIs
+    // ==============================
+
+    // Create Listing (Protected)
     app.post(
       '/listing',
       verifyToken,
       async (req: AuthRequest, res: Response) => {
-        const listing: Listing = req.body;
+        try {
+          const listing = req.body;
 
-        const newListing = {
-          ...listing,
-          ownerId: req.user?._id,
-          ownerEmail: req.user?.email,
-          bookingCount: 0,
-          createdAt: new Date(),
-        };
+          // Validate required fields
+          const requiredFields = [
+            'name',
+            'description',
+            'image',
+            'type',
+            'location',
+            'capacity',
+            'pricePerDay',
+          ];
+          for (const field of requiredFields) {
+            if (!listing[field]) {
+              return res.status(400).send({
+                error: `Missing required field: ${field}`,
+              });
+            }
+          }
 
-        const result = await listingCollection.insertOne(newListing);
+          const newListing = {
+            ...listing,
+            ownerId: req.user?._id,
+            ownerEmail: req.user?.email,
+            bookingCount: 0,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          };
 
-        res.send(result);
+          const result = await listingCollection.insertOne(newListing);
+
+          res.status(201).send({
+            success: true,
+            data: {
+              ...newListing,
+              _id: result.insertedId,
+            },
+          });
+        } catch (error) {
+          console.error('Error creating listing:', error);
+          res.status(500).send({
+            error: 'Failed to create listing',
+            message: error instanceof Error ? error.message : 'Unknown error',
+          });
+        }
       },
     );
-    // Explore Route (Public)
+
+    // Get All Listings (Public) - With Pagination & Filters
     app.get('/listing', async (req: Request, res: Response) => {
       try {
-        // 1. Extract pagination parameters from query string
-        const page = parseInt(req.query.page as string) || 1; // Default: page 1
-        const limit = parseInt(req.query.limit as string) || 12; // Default: 12 items per page
-        const skip = (page - 1) * limit; // Calculate how many to skip
+        const page = parseInt(req.query.page as string) || 1;
+        const limit = parseInt(req.query.limit as string) || 12;
+        const skip = (page - 1) * limit;
 
-        // 2. Extract filter parameters (optional)
         const search = (req.query.search as string) || '';
         const type = (req.query.type as string) || '';
         const minPrice = parseFloat(req.query.minPrice as string) || 0;
@@ -168,21 +185,17 @@ async function run() {
         const sortBy = (req.query.sortBy as string) || 'createdAt';
         const sortOrder = (req.query.sortOrder as string) || 'desc';
 
-        // 3. Build filter object
+        // Build filter
         const filter: any = {};
-
-        // Price filter
         filter.pricePerDay = {
           $gte: minPrice,
           $lte: maxPrice,
         };
 
-        // Type filter
         if (type) {
           filter.type = type;
         }
 
-        // Search filter (search in name and description)
         if (search) {
           filter.$or = [
             { name: { $regex: search, $options: 'i' } },
@@ -190,15 +203,15 @@ async function run() {
           ];
         }
 
-        // 4. Build sort object
+        // Build sort
         const sort: any = {};
         sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
 
-        // 5. Get total count for pagination info
+        // Get total count
         const totalItems = await listingCollection.countDocuments(filter);
         const totalPages = Math.ceil(totalItems / limit);
 
-        // 6. Fetch paginated data
+        // Fetch paginated data
         const result = await listingCollection
           .find(filter)
           .sort(sort)
@@ -206,9 +219,21 @@ async function run() {
           .limit(limit)
           .toArray();
 
-        // 7. Send response with pagination metadata
+        // Get booking counts for each listing
+        const listingsWithStats = await Promise.all(
+          result.map(async listing => {
+            const bookingCount = await bookingCollection.countDocuments({
+              listingId: listing._id,
+            });
+            return {
+              ...listing,
+              bookingCount,
+            };
+          }),
+        );
+
         res.send({
-          data: result,
+          data: listingsWithStats,
           pagination: {
             currentPage: page,
             totalPages: totalPages,
@@ -227,117 +252,407 @@ async function run() {
       }
     });
 
+    // Get Featured Listings (Public)
     app.get('/featured', async (_req: Request, res: Response) => {
-      const result = await listingCollection
-        .find()
-        .sort({ createdAt: -1 })
-        .limit(6)
-        .toArray();
+      try {
+        const result = await listingCollection
+          .find()
+          .sort({ createdAt: -1 })
+          .limit(6)
+          .toArray();
 
-      res.send(result);
+        const featuredWithStats = await Promise.all(
+          result.map(async listing => {
+            const bookingCount = await bookingCollection.countDocuments({
+              listingId: listing._id,
+            });
+            return {
+              ...listing,
+              bookingCount,
+            };
+          }),
+        );
+
+        res.send(featuredWithStats);
+      } catch (error) {
+        console.error('Error fetching featured listings:', error);
+        res.status(500).send({
+          error: 'Failed to fetch featured listings',
+          message: error instanceof Error ? error.message : 'Unknown error',
+        });
+      }
     });
 
+    // Get Single Listing (Public)
     app.get('/listing/:id', async (req: Request, res: Response) => {
-      const { id } = req.params;
+      try {
+        const { id } = req.params;
+        const idString = Array.isArray(id) ? id[0] : id;
 
-      const result = await listingCollection.findOne({
-        _id: new ObjectId(id),
-      });
+        if (!ObjectId.isValid(idString)) {
+          return res.status(400).send({
+            error: 'Invalid listing ID format',
+          });
+        }
 
-      res.send(result);
+        const result = await listingCollection.findOne({
+          _id: new ObjectId(idString),
+        });
+
+        if (!result) {
+          return res.status(404).send({
+            error: 'Listing not found',
+          });
+        }
+
+        // Get booking count
+        const bookingCount = await bookingCollection.countDocuments({
+          listingId: result._id,
+        });
+
+        res.send({
+          ...result,
+          bookingCount,
+        });
+      } catch (error) {
+        console.error('Error fetching listing:', error);
+        res.status(500).send({
+          error: 'Failed to fetch listing',
+          message: error instanceof Error ? error.message : 'Unknown error',
+        });
+      }
     });
 
+    // Update Listing (Protected - Owner Only)
     app.put(
       '/listing/:id',
       verifyToken,
       async (req: AuthRequest, res: Response) => {
-        const { id } = req.params;
+        try {
+          const { id } = req.params;
+          const idString = Array.isArray(id) ? id[0] : id;
 
-        const listing = await listingCollection.findOne({
-          _id: new ObjectId(id),
-        });
+          if (!ObjectId.isValid(idString)) {
+            return res.status(400).send({
+              error: 'Invalid listing ID format',
+            });
+          }
 
-        if (!listing) {
-          return res.status(404).send({
-            message: 'Listing not found',
+          const listing = await listingCollection.findOne({
+            _id: new ObjectId(idString),
           });
-        }
 
-        if (listing.ownerEmail !== req.user?.email) {
-          return res.status(403).send({
-            message: 'Forbidden',
-          });
-        }
+          if (!listing) {
+            return res.status(404).send({
+              message: 'Listing not found',
+            });
+          }
 
-        await listingCollection.updateOne(
-          {
-            _id: new ObjectId(id),
-          },
-          {
-            $set: {
-              ...req.body,
-              updatedAt: new Date(),
+          if (listing.ownerEmail !== req.user?.email) {
+            return res.status(403).send({
+              message: "Forbidden - You don't own this listing",
+            });
+          }
+
+          const updates = req.body;
+          delete updates._id;
+          delete updates.ownerId;
+          delete updates.ownerEmail;
+          delete updates.createdAt;
+
+          await listingCollection.updateOne(
+            {
+              _id: new ObjectId(idString),
             },
-          },
-        );
+            {
+              $set: {
+                ...updates,
+                updatedAt: new Date(),
+              },
+            },
+          );
 
-        res.send({
-          message: 'Updated Successfully',
-        });
+          const updatedListing = await listingCollection.findOne({
+            _id: new ObjectId(idString),
+          });
+
+          res.send({
+            success: true,
+            data: updatedListing,
+          });
+        } catch (error) {
+          console.error('Error updating listing:', error);
+          res.status(500).send({
+            error: 'Failed to update listing',
+            message: error instanceof Error ? error.message : 'Unknown error',
+          });
+        }
       },
     );
 
+    // Delete Listing (Protected - Owner Only)
     app.delete(
       '/listing/:id',
       verifyToken,
       async (req: AuthRequest, res: Response) => {
-        const { id } = req.params;
+        try {
+          const { id } = req.params;
+          const idString = Array.isArray(id) ? id[0] : id;
 
-        const listing = await listingCollection.findOne({
-          _id: new ObjectId(id),
-        });
+          if (!ObjectId.isValid(idString)) {
+            return res.status(400).send({
+              error: 'Invalid listing ID format',
+            });
+          }
 
-        if (!listing) {
-          return res.status(404).send({
-            message: 'Listing not found',
+          const listing = await listingCollection.findOne({
+            _id: new ObjectId(idString),
+          });
+
+          if (!listing) {
+            return res.status(404).send({
+              message: 'Listing not found',
+            });
+          }
+
+          if (listing.ownerEmail !== req.user?.email) {
+            return res.status(403).send({
+              message: "Forbidden - You don't own this listing",
+            });
+          }
+
+          await listingCollection.deleteOne({
+            _id: new ObjectId(idString),
+          });
+
+          // Also delete related bookings
+          await bookingCollection.deleteMany({
+            listingId: new ObjectId(idString),
+          });
+
+          res.send({
+            success: true,
+            message: 'Listing deleted successfully',
+          });
+        } catch (error) {
+          console.error('Error deleting listing:', error);
+          res.status(500).send({
+            error: 'Failed to delete listing',
+            message: error instanceof Error ? error.message : 'Unknown error',
           });
         }
-
-        if (listing.ownerEmail !== req.user?.email) {
-          return res.status(403).send({
-            message: 'Forbidden',
-          });
-        }
-
-        await listingCollection.deleteOne({
-          _id: new ObjectId(id),
-        });
-
-        res.send({
-          message: 'Deleted Successfully',
-        });
       },
     );
 
+    // Get My Listings (Protected)
     app.get(
       '/my-listings',
       verifyToken,
       async (req: AuthRequest, res: Response) => {
-        const result = await listingCollection
-          .find({
-            ownerEmail: req.user?.email,
-          })
-          .sort({
-            createdAt: -1,
-          })
-          .toArray();
+        try {
+          const result = await listingCollection
+            .find({
+              ownerEmail: req.user?.email,
+            })
+            .sort({
+              createdAt: -1,
+            })
+            .toArray();
 
-        res.send(result);
+          res.send(result);
+        } catch (error) {
+          console.error('Error fetching my listings:', error);
+          res.status(500).send({
+            error: 'Failed to fetch your listings',
+            message: error instanceof Error ? error.message : 'Unknown error',
+          });
+        }
       },
     );
 
     // ==============================
-    // Protected API
+    // BOOKING APIs
+    // ==============================
+
+    // Create Booking (Protected)
+    app.post(
+      '/bookings',
+      verifyToken,
+      async (req: AuthRequest, res: Response) => {
+        try {
+          const { listingId, startDate, endDate, guests, totalPrice } =
+            req.body;
+
+          // Validate required fields
+          if (!listingId || !startDate || !endDate || !guests || !totalPrice) {
+            return res.status(400).send({
+              error: 'Missing required booking fields',
+            });
+          }
+
+          // Ensure listingId is a valid string
+          const idString = Array.isArray(listingId) ? listingId[0] : listingId;
+
+          if (!ObjectId.isValid(idString)) {
+            return res.status(400).send({
+              error: 'Invalid listing ID format',
+            });
+          }
+
+          // Check if listing exists
+          const listing = await listingCollection.findOne({
+            _id: new ObjectId(idString),
+          });
+
+          if (!listing) {
+            return res.status(404).send({
+              error: 'Listing not found',
+            });
+          }
+
+          // Create booking
+          const booking = {
+            listingId: new ObjectId(idString),
+            userId: req.user?._id,
+            userName: req.user?.name,
+            userEmail: req.user?.email,
+            startDate: new Date(startDate),
+            endDate: new Date(endDate),
+            guests,
+            totalPrice,
+            status: 'confirmed',
+            createdAt: new Date(),
+          };
+
+          const result = await bookingCollection.insertOne(booking);
+
+          // Increment booking count
+          await listingCollection.updateOne(
+            { _id: new ObjectId(idString) },
+            { $inc: { bookingCount: 1 } },
+          );
+
+          res.status(201).send({
+            success: true,
+            data: {
+              ...booking,
+              _id: result.insertedId,
+            },
+          });
+        } catch (error) {
+          console.error('Error creating booking:', error);
+          res.status(500).send({
+            error: 'Failed to create booking',
+            message: error instanceof Error ? error.message : 'Unknown error',
+          });
+        }
+      },
+    );
+
+    // Get My Bookings (Protected)
+    app.get(
+      '/my-bookings',
+      verifyToken,
+      async (req: AuthRequest, res: Response) => {
+        try {
+          const result = await bookingCollection
+            .find({
+              userEmail: req.user?.email,
+            })
+            .sort({
+              createdAt: -1,
+            })
+            .toArray();
+
+          // Get listing details for each booking
+          const bookingsWithDetails = await Promise.all(
+            result.map(async booking => {
+              const listing = await listingCollection.findOne({
+                _id: booking.listingId,
+              });
+              return {
+                ...booking,
+                listing,
+              };
+            }),
+          );
+
+          res.send(bookingsWithDetails);
+        } catch (error) {
+          console.error('Error fetching bookings:', error);
+          res.status(500).send({
+            error: 'Failed to fetch bookings',
+            message: error instanceof Error ? error.message : 'Unknown error',
+          });
+        }
+      },
+    );
+
+    // Cancel Booking (Protected)
+    app.delete(
+      '/bookings/:id',
+      verifyToken,
+      async (req: AuthRequest, res: Response) => {
+        try {
+          const { id } = req.params;
+          const idString = Array.isArray(id) ? id[0] : id;
+
+          if (!ObjectId.isValid(idString)) {
+            return res.status(400).send({
+              error: 'Invalid booking ID format',
+            });
+          }
+
+          const booking = await bookingCollection.findOne({
+            _id: new ObjectId(idString),
+          });
+
+          if (!booking) {
+            return res.status(404).send({
+              message: 'Booking not found',
+            });
+          }
+
+          // Check if user owns this booking
+          if (booking.userEmail !== req.user?.email) {
+            return res.status(403).send({
+              message: "Forbidden - You don't own this booking",
+            });
+          }
+
+          // Update booking status
+          await bookingCollection.updateOne(
+            { _id: new ObjectId(idString) },
+            {
+              $set: {
+                status: 'cancelled',
+                updatedAt: new Date(),
+              },
+            },
+          );
+
+          // Decrement booking count
+          await listingCollection.updateOne(
+            { _id: booking.listingId },
+            { $inc: { bookingCount: -1 } },
+          );
+
+          res.send({
+            success: true,
+            message: 'Booking cancelled successfully',
+          });
+        } catch (error) {
+          console.error('Error cancelling booking:', error);
+          res.status(500).send({
+            error: 'Failed to cancel booking',
+            message: error instanceof Error ? error.message : 'Unknown error',
+          });
+        }
+      },
+    );
+
+    // ==============================
+    // Protected User API
     // ==============================
 
     app.get('/me', verifyToken, async (req: AuthRequest, res: Response) => {
@@ -345,7 +660,8 @@ async function run() {
     });
 
     console.log('✅ MongoDB Connected');
-  } finally {
+  } catch (error) {
+    console.error('❌ MongoDB Connection Error:', error);
   }
 }
 
