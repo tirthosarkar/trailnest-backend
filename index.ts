@@ -152,14 +152,79 @@ async function run() {
         res.send(result);
       },
     );
+    // Explore Route (Public)
+    app.get('/listing', async (req: Request, res: Response) => {
+      try {
+        // 1. Extract pagination parameters from query string
+        const page = parseInt(req.query.page as string) || 1; // Default: page 1
+        const limit = parseInt(req.query.limit as string) || 12; // Default: 12 items per page
+        const skip = (page - 1) * limit; // Calculate how many to skip
 
-    app.get('/listing', async (_req: Request, res: Response) => {
-      const result = await listingCollection
-        .find()
-        .sort({ createdAt: -1 })
-        .toArray();
+        // 2. Extract filter parameters (optional)
+        const search = (req.query.search as string) || '';
+        const type = (req.query.type as string) || '';
+        const minPrice = parseFloat(req.query.minPrice as string) || 0;
+        const maxPrice = parseFloat(req.query.maxPrice as string) || 999999;
+        const sortBy = (req.query.sortBy as string) || 'createdAt';
+        const sortOrder = (req.query.sortOrder as string) || 'desc';
 
-      res.send(result);
+        // 3. Build filter object
+        const filter: any = {};
+
+        // Price filter
+        filter.pricePerDay = {
+          $gte: minPrice,
+          $lte: maxPrice,
+        };
+
+        // Type filter
+        if (type) {
+          filter.type = type;
+        }
+
+        // Search filter (search in name and description)
+        if (search) {
+          filter.$or = [
+            { name: { $regex: search, $options: 'i' } },
+            { description: { $regex: search, $options: 'i' } },
+          ];
+        }
+
+        // 4. Build sort object
+        const sort: any = {};
+        sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
+
+        // 5. Get total count for pagination info
+        const totalItems = await listingCollection.countDocuments(filter);
+        const totalPages = Math.ceil(totalItems / limit);
+
+        // 6. Fetch paginated data
+        const result = await listingCollection
+          .find(filter)
+          .sort(sort)
+          .skip(skip)
+          .limit(limit)
+          .toArray();
+
+        // 7. Send response with pagination metadata
+        res.send({
+          data: result,
+          pagination: {
+            currentPage: page,
+            totalPages: totalPages,
+            totalItems: totalItems,
+            itemsPerPage: limit,
+            hasNextPage: page < totalPages,
+            hasPrevPage: page > 1,
+          },
+        });
+      } catch (error) {
+        console.error('Error fetching listings:', error);
+        res.status(500).send({
+          error: 'Failed to fetch listings',
+          message: error instanceof Error ? error.message : 'Unknown error',
+        });
+      }
     });
 
     app.get('/featured', async (_req: Request, res: Response) => {
